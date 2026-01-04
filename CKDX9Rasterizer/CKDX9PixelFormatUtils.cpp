@@ -33,10 +33,6 @@ D3DFORMAT VxPixelFormatToD3DFormat(VX_PIXELFORMAT pf)
         case _32_V16U16: return D3DFMT_V16U16; // 32-bit Bump Map format (16 bits per color)
         case _16_L6V5U5: return D3DFMT_L6V5U5; // 16-bit Bump Map format with luminance
         case _32_X8L8V8U8: return D3DFMT_X8L8V8U8; // 32-bit Bump Map format with luminance
-        case _8_ABGR8888_CLUT: return D3DFMT_UNKNOWN; // 8 bits indexed CLUT (ABGR)
-        case _8_ARGB8888_CLUT: return D3DFMT_UNKNOWN; // 8 bits indexed CLUT (ARGB)
-        case _4_ABGR8888_CLUT: return D3DFMT_UNKNOWN; // 4 bits indexed CLUT (ABGR)
-        case _4_ARGB8888_CLUT: return D3DFMT_UNKNOWN; // 4 bits indexed CLUT (ARGB)
         default: return D3DFMT_UNKNOWN;
     }
 }
