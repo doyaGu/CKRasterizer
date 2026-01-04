@@ -1,60 +1,5 @@
 #include "CKDX9Rasterizer.h"
 
-static const D3DFORMAT TextureFormats[] = {
-    D3DFMT_R8G8B8,
-    D3DFMT_A8R8G8B8,
-    D3DFMT_X8R8G8B8,
-    D3DFMT_R5G6B5,
-    D3DFMT_X1R5G5B5,
-    D3DFMT_A1R5G5B5,
-    D3DFMT_A4R4G4B4,
-    D3DFMT_R3G3B2,
-    D3DFMT_A8,
-    D3DFMT_A8R3G3B2,
-    D3DFMT_X4R4G4B4,
-    D3DFMT_A2B10G10R10,
-    D3DFMT_A8B8G8R8,
-    D3DFMT_X8B8G8R8,
-    D3DFMT_G16R16,
-    D3DFMT_A2R10G10B10,
-    D3DFMT_A16B16G16R16,
-
-    D3DFMT_A8P8,
-    D3DFMT_P8,
-
-    D3DFMT_L8,
-    D3DFMT_A8L8,
-    D3DFMT_A4L4,
-
-    D3DFMT_V8U8,
-    D3DFMT_L6V5U5,
-    D3DFMT_X8L8V8U8,
-    D3DFMT_Q8W8V8U8,
-    D3DFMT_V16U16,
-    D3DFMT_A2W10V10U10,
-
-    D3DFMT_UYVY,
-    D3DFMT_R8G8_B8G8,
-    D3DFMT_YUY2,
-    D3DFMT_G8R8_G8B8,
-    D3DFMT_DXT1,
-    D3DFMT_DXT2,
-    D3DFMT_DXT3,
-    D3DFMT_DXT4,
-    D3DFMT_DXT5
-};
-
-inline unsigned int popcount(unsigned int x)
-{
-    unsigned int count = 0;
-    while (x)
-    {
-        count += x & 1;
-        x >>= 1;
-    }
-    return count;
-}
-
 CKDX9RasterizerDriver::CKDX9RasterizerDriver(CKDX9Rasterizer *rst) { m_Owner = rst; }
 
 CKDX9RasterizerDriver::~CKDX9RasterizerDriver() {}
@@ -532,12 +477,12 @@ D3DFORMAT CKDX9RasterizerDriver::FindNearestTextureFormat(CKTextureDesc *desc, D
             score -= 8000.0f; // Heavy penalty for losing alpha
 
         // Penalize color component differences
-        int redDiff = popcount(it->Format.RedMask ^ desc->Format.RedMask);
-        int greenDiff = popcount(it->Format.GreenMask ^ desc->Format.GreenMask);
-        int blueDiff = popcount(it->Format.BlueMask ^ desc->Format.BlueMask);
-        int alphaDiff = (needsAlpha && formatHasAlpha) ? popcount(it->Format.AlphaMask ^ desc->Format.AlphaMask) : 0;
+        XDWORD redDiff = GetBitCount(it->Format.RedMask ^ desc->Format.RedMask);
+        XDWORD greenDiff = GetBitCount(it->Format.GreenMask ^ desc->Format.GreenMask);
+        XDWORD blueDiff = GetBitCount(it->Format.BlueMask ^ desc->Format.BlueMask);
+        XDWORD alphaDiff = (needsAlpha && formatHasAlpha) ? GetBitCount(it->Format.AlphaMask ^ desc->Format.AlphaMask) : 0;
 
-        score -= (redDiff + greenDiff + blueDiff + alphaDiff) * 10.0f;
+        score -= (float)(redDiff + greenDiff + blueDiff + alphaDiff) * 10.0f;
 
         // For compressed textures, prefer DXT formats
         if (isCompressed)
