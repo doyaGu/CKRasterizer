@@ -141,7 +141,10 @@ CKRasterizer *CKDX9RasterizerStart(WIN_HANDLE AppWnd)
         CKRasterizer *rasterizer = new CKDX9Rasterizer;
         CKDX9_LOG("CKDX9RasterizerStart allocated rasterizer=%p", rasterizer);
         if (!rasterizer)
+        {
+            FreeLibrary(handle);
             return NULL;
+        }
         if (!rasterizer->Start(AppWnd))
         {
             CKDX9_LOG("CKDX9RasterizerStart Start failed rasterizer=%p", rasterizer);
@@ -151,6 +154,7 @@ CKRasterizer *CKDX9RasterizerStart(WIN_HANDLE AppWnd)
         }
         CKDX9_LOG("CKDX9RasterizerStart success rasterizer=%p drivers=%d",
                   rasterizer, rasterizer->GetDriverCount());
+        FreeLibrary(handle);
         return rasterizer;
     }
     CKDX9_LOG("CKDX9RasterizerStart failed: d3d9.dll unavailable");
