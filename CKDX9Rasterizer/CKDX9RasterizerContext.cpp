@@ -3441,21 +3441,28 @@ int CKDX9RasterizerContext::CopyToMemoryBuffer(CKRECT *rect, VXBUFFER_TYPE buffe
     RECT srcRect = {(LONG)left, (LONG)top, (LONG)right, (LONG)bottom};
 
     // Try to create a temporary surface for the copy operation
-    hr = m_Device->CreateOffscreenPlainSurface(width, height, desc.Format, D3DPOOL_SCRATCH, &tempSurface, NULL);
-    CKDX9_LOG("CopyToMemoryBuffer CreateOffscreenPlainSurface %ux%u fmt=0x%08X pool=SCRATCH hr=0x%08lX temp=%p",
-              width, height, (unsigned)desc.Format, (unsigned long)hr, tempSurface);
+    if (buffer == VXBUFFER_BACKBUFFER)
+    {
+        hr = m_Device->CreateOffscreenPlainSurface(desc.Width, desc.Height, desc.Format, D3DPOOL_SYSTEMMEM, &tempSurface, NULL);
+        CKDX9_LOG("CopyToMemoryBuffer CreateOffscreenPlainSurface %ux%u fmt=0x%08X pool=SYSTEMMEM hr=0x%08lX temp=%p",
+                  desc.Width, desc.Height, (unsigned)desc.Format, (unsigned long)hr, tempSurface);
+    }
+    else
+    {
+        hr = E_FAIL;
+        CKDX9_LOG("CopyToMemoryBuffer unsupported direct readback buffer=%s fmt=0x%08X",
+                  DX9BufferTypeName(buffer), (unsigned)desc.Format);
+    }
+
     if (SUCCEEDED(hr) && tempSurface)
     {
-        // Copy source region to temp surface
-        POINT destPoint = {0, 0};
-        hr = m_Device->UpdateSurface(surface, &srcRect, tempSurface, &destPoint);
-        CKDX9_LOG("CopyToMemoryBuffer UpdateSurface source=%p temp=%p rect=(%ld,%ld,%ld,%ld) hr=0x%08lX",
-                  surface, tempSurface, srcRect.left, srcRect.top, srcRect.right, srcRect.bottom, (unsigned long)hr);
+        hr = m_Device->GetRenderTargetData(surface, tempSurface);
+        CKDX9_LOG("CopyToMemoryBuffer GetRenderTargetData source=%p temp=%p hr=0x%08lX",
+                  surface, tempSurface, (unsigned long)hr);
         if (SUCCEEDED(hr))
         {
-            // Lock the entire temp surface
             D3DLOCKED_RECT lockedRect;
-            hr = tempSurface->LockRect(&lockedRect, NULL, D3DLOCK_READONLY);
+            hr = tempSurface->LockRect(&lockedRect, &srcRect, D3DLOCK_READONLY);
             CKDX9_LOG("CopyToMemoryBuffer temp LockRect hr=0x%08lX pitch=%ld bits=%p",
                       (unsigned long)hr, SUCCEEDED(hr) ? (long)lockedRect.Pitch : 0L,
                       SUCCEEDED(hr) ? lockedRect.pBits : NULL);
@@ -3635,14 +3642,14 @@ int CKDX9RasterizerContext::CopyFromMemoryBuffer(CKRECT *rect, VXBUFFER_TYPE buf
     // Create temporary surface matching source image size
     IDirect3DSurface9 *tempSurface = NULL;
     hr = m_Device->CreateOffscreenPlainSurface(
-        img_desc.Width, 
-        img_desc.Height, 
-        desc.Format, 
-        D3DPOOL_SCRATCH,
-        &tempSurface, 
+        img_desc.Width,
+        img_desc.Height,
+        desc.Format,
+        D3DPOOL_SYSTEMMEM,
+        &tempSurface,
         NULL
     );
-    CKDX9_LOG("CopyFromMemoryBuffer CreateOffscreenPlainSurface %ux%u fmt=0x%08X pool=SCRATCH hr=0x%08lX temp=%p",
+    CKDX9_LOG("CopyFromMemoryBuffer CreateOffscreenPlainSurface %ux%u fmt=0x%08X pool=SYSTEMMEM hr=0x%08lX temp=%p",
               img_desc.Width, img_desc.Height, (unsigned)desc.Format, (unsigned long)hr, tempSurface);
     if (FAILED(hr) || !tempSurface)
     {
