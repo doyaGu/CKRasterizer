@@ -13,6 +13,9 @@ CKRasterizerContext *CKDX9RasterizerDriver::CreateContext()
 
 CKBOOL CKDX9RasterizerDriver::InitializeCaps(int AdapterIndex, D3DDEVTYPE DevType)
 {
+    CKDX9_LOG("CKDX9RasterizerDriver::InitializeCaps begin this=%p adapter=%d devType=%u",
+              this, AdapterIndex, (unsigned)DevType);
+
     // Store adapter and device info
     m_AdapterIndex = AdapterIndex;
     m_DevType = DevType;
@@ -20,25 +23,52 @@ CKBOOL CKDX9RasterizerDriver::InitializeCaps(int AdapterIndex, D3DDEVTYPE DevTyp
     // Get D3D9 interface
     IDirect3D9* pD3D = static_cast<CKDX9Rasterizer*>(m_Owner)->m_D3D9;
     if (!pD3D)
+    {
+        CKDX9_LOG("CKDX9RasterizerDriver::InitializeCaps failed: null D3D9 owner=%p", m_Owner);
         return FALSE;
+    }
 
     // Get adapter identifier
-    if (FAILED(pD3D->GetAdapterIdentifier(AdapterIndex, D3DENUM_WHQL_LEVEL, &m_D3DIdentifier)))
+    HRESULT hr = pD3D->GetAdapterIdentifier(AdapterIndex, D3DENUM_WHQL_LEVEL, &m_D3DIdentifier);
+    if (FAILED(hr))
+    {
+        CKDX9_LOG("CKDX9RasterizerDriver::InitializeCaps GetAdapterIdentifier failed adapter=%d hr=0x%08lX",
+                  AdapterIndex, (unsigned long)hr);
         return FALSE;
+    }
+    CKDX9_LOG("CKDX9RasterizerDriver::InitializeCaps adapter=%d identifier=\"%s\" driver=\"%s\" vendor=0x%08lX device=0x%08lX",
+              AdapterIndex, m_D3DIdentifier.Description, m_D3DIdentifier.Driver,
+              (unsigned long)m_D3DIdentifier.VendorId, (unsigned long)m_D3DIdentifier.DeviceId);
 
     // Get current display mode
     D3DDISPLAYMODE currentMode;
-    if (FAILED(pD3D->GetAdapterDisplayMode(AdapterIndex, &currentMode)))
+    hr = pD3D->GetAdapterDisplayMode(AdapterIndex, &currentMode);
+    if (FAILED(hr))
+    {
+        CKDX9_LOG("CKDX9RasterizerDriver::InitializeCaps GetAdapterDisplayMode failed adapter=%d hr=0x%08lX",
+                  AdapterIndex, (unsigned long)hr);
         return FALSE;
+    }
+    CKDX9_LOG("CKDX9RasterizerDriver::InitializeCaps currentMode=%ux%u fmt=0x%08X refresh=%u",
+              currentMode.Width, currentMode.Height, (unsigned)currentMode.Format, currentMode.RefreshRate);
 
     // Get device capabilities
-    if (FAILED(pD3D->GetDeviceCaps(AdapterIndex, DevType, &m_D3DCaps)))
+    hr = pD3D->GetDeviceCaps(AdapterIndex, DevType, &m_D3DCaps);
+    if (FAILED(hr))
+    {
+        CKDX9_LOG("CKDX9RasterizerDriver::InitializeCaps GetDeviceCaps failed adapter=%d devType=%u hr=0x%08lX",
+                  AdapterIndex, (unsigned)DevType, (unsigned long)hr);
         return FALSE;
+    }
 
     // Check if adapter is valid
     UINT adapterCount = pD3D->GetAdapterCount();
     if (AdapterIndex >= adapterCount)
+    {
+        CKDX9_LOG("CKDX9RasterizerDriver::InitializeCaps failed: adapter=%d adapterCount=%u",
+                  AdapterIndex, adapterCount);
         return FALSE;
+    }
 
     // Define formats to check for display modes
     const D3DFORMAT allowedAdapterFormatArray[] = {
@@ -52,7 +82,10 @@ CKBOOL CKDX9RasterizerDriver::InitializeCaps(int AdapterIndex, D3DDEVTYPE DevTyp
      const int allowedAdapterFormatArrayCount = sizeof(allowedAdapterFormatArray) / sizeof(allowedAdapterFormatArray[0]);
 
      // Add current display mode format to render formats
-     if (SUCCEEDED(pD3D->CheckDeviceType(AdapterIndex, DevType, currentMode.Format, currentMode.Format, FALSE)))
+     hr = pD3D->CheckDeviceType(AdapterIndex, DevType, currentMode.Format, currentMode.Format, FALSE);
+     CKDX9_LOG("CKDX9RasterizerDriver::InitializeCaps CheckDeviceType fullscreen current fmt=0x%08X hr=0x%08lX",
+               (unsigned)currentMode.Format, (unsigned long)hr);
+     if (SUCCEEDED(hr))
      {
          m_RenderFormats.PushBack(currentMode.Format);
 
@@ -122,6 +155,8 @@ CKBOOL CKDX9RasterizerDriver::InitializeCaps(int AdapterIndex, D3DDEVTYPE DevTyp
          else
              m_RenderFormats.PushBack(D3DFMT_X8R8G8B8); // Last resort fallback
      }
+     CKDX9_LOG("CKDX9RasterizerDriver::InitializeCaps renderFormats=%d displayModes=%d",
+               m_RenderFormats.Size(), m_DisplayModes.Size());
 
     // Define texture formats to check
     const D3DFORMAT textureFormatArray[] = {
@@ -135,12 +170,8 @@ CKBOOL CKDX9RasterizerDriver::InitializeCaps(int AdapterIndex, D3DDEVTYPE DevTyp
         D3DFMT_DXT1,      // Compressed formats
         D3DFMT_DXT3,
         D3DFMT_DXT5,
-        D3DFMT_A8,        // Alpha and luminance formats
-        D3DFMT_L8,
-        D3DFMT_A8L8,
         D3DFMT_V8U8,      // Bump mapping formats
         D3DFMT_V16U16,
-        D3DFMT_Q8W8V8U8,
         D3DFMT_X8L8V8U8,
         D3DFMT_L6V5U5,
         D3DFMT_R3G3B2     // Other less common formats
@@ -176,7 +207,8 @@ CKBOOL CKDX9RasterizerDriver::InitializeCaps(int AdapterIndex, D3DDEVTYPE DevTyp
             // Create a texture descriptor for this format
             CKTextureDesc desc;
             D3DFormatToTextureDesc(texFormat, &desc);
-            m_TextureFormats.PushBack(desc);
+            if ((desc.Flags & CKRST_TEXTURE_VALID) != 0)
+                m_TextureFormats.PushBack(desc);
         }
     }
 
@@ -320,6 +352,12 @@ CKBOOL CKDX9RasterizerDriver::InitializeCaps(int AdapterIndex, D3DDEVTYPE DevTyp
     m_CapsUpToDate = TRUE;
     m_Inited = TRUE;
 
+    CKDX9_LOG("CKDX9RasterizerDriver::InitializeCaps success adapter=%d textureFormats=%d maxTex=%ux%u stages=%u simTex=%u desc=\"%s\"",
+              AdapterIndex, m_TextureFormats.Size(),
+              m_D3DCaps.MaxTextureWidth, m_D3DCaps.MaxTextureHeight,
+              m_D3DCaps.MaxTextureBlendStages, m_D3DCaps.MaxSimultaneousTextures,
+              m_Desc.CStr());
+
     return TRUE;
 }
 
@@ -342,10 +380,8 @@ D3DFORMAT CKDX9RasterizerDriver::FindNearestTextureFormat(CKTextureDesc *desc, D
             D3DFMT_A8R8G8B8, D3DFMT_X8R8G8B8, D3DFMT_A4R4G4B4, D3DFMT_R5G6B5, D3DFMT_X1R5G5B5, D3DFMT_A1R5G5B5,
             // Compressed formats
             D3DFMT_DXT1, D3DFMT_DXT3, D3DFMT_DXT5,
-            // Alpha formats
-            D3DFMT_A8, D3DFMT_A8L8, D3DFMT_A4L4,
             // Other formats
-            D3DFMT_R8G8B8, D3DFMT_R3G3B2, D3DFMT_X4R4G4B4, D3DFMT_G16R16, D3DFMT_A16B16G16R16};
+            D3DFMT_R8G8B8, D3DFMT_R3G3B2};
         const int formatCount = sizeof(commonFormats) / sizeof(commonFormats[0]);
 
         // Check each format for compatibility with the adapter
@@ -355,7 +391,8 @@ D3DFORMAT CKDX9RasterizerDriver::FindNearestTextureFormat(CKTextureDesc *desc, D
             {
                 CKTextureDesc formatDesc;
                 D3DFormatToTextureDesc(commonFormats[i], &formatDesc);
-                m_TextureFormats.PushBack(formatDesc);
+                if ((formatDesc.Flags & CKRST_TEXTURE_VALID) != 0)
+                    m_TextureFormats.PushBack(formatDesc);
             }
         }
 
@@ -389,13 +426,15 @@ D3DFORMAT CKDX9RasterizerDriver::FindNearestTextureFormat(CKTextureDesc *desc, D
     D3DFORMAT requestedFormat = TextureDescToD3DFormat(desc);
 
     // First, check if the requested format is directly supported
-    if (requestedFormat != D3DFMT_UNKNOWN && IsTextureFormatSupported(requestedFormat, AdapterFormat, Usage))
+    if ((desc->Flags & CKRST_TEXTURE_CUBEMAP) == 0 &&
+        requestedFormat != D3DFMT_UNKNOWN &&
+        IsTextureFormatSupported(requestedFormat, AdapterFormat, Usage))
     {
         return requestedFormat;
     }
 
     // Special case for render targets - they have strict format requirements
-    if (Usage & D3DUSAGE_RENDERTARGET)
+    if ((desc->Flags & CKRST_TEXTURE_CUBEMAP) == 0 && (Usage & D3DUSAGE_RENDERTARGET))
     {
         // Start with common render target formats in preference order
         static const D3DFORMAT rtFormats[] = {
@@ -420,7 +459,10 @@ D3DFORMAT CKDX9RasterizerDriver::FindNearestTextureFormat(CKTextureDesc *desc, D
     if (desc->Flags & CKRST_TEXTURE_CUBEMAP)
     {
         // First check if the original format supports cube maps
-        if (IsTextureFormatSupported(requestedFormat, AdapterFormat, Usage | D3DUSAGE_DYNAMIC))
+        if (requestedFormat != D3DFMT_UNKNOWN &&
+            owner->m_D3D9->CheckDeviceFormat(
+                m_AdapterIndex, m_DevType, AdapterFormat,
+                Usage, D3DRTYPE_CUBETEXTURE, requestedFormat) == D3D_OK)
         {
             return requestedFormat;
         }
@@ -482,7 +524,7 @@ D3DFORMAT CKDX9RasterizerDriver::FindNearestTextureFormat(CKTextureDesc *desc, D
         XDWORD blueDiff = GetBitCount(it->Format.BlueMask ^ desc->Format.BlueMask);
         XDWORD alphaDiff = (needsAlpha && formatHasAlpha) ? GetBitCount(it->Format.AlphaMask ^ desc->Format.AlphaMask) : 0;
 
-        score -= (float)(redDiff + greenDiff + blueDiff + alphaDiff) * 10.0f;
+        score -= static_cast<float>(redDiff + greenDiff + blueDiff + alphaDiff) * 10.0f;
 
         // For compressed textures, prefer DXT formats
         if (isCompressed)

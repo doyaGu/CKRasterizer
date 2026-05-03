@@ -1,8 +1,8 @@
 #ifndef CKRASTERIZERDX9_H
 #define CKRASTERIZERDX9_H
 
-#ifdef _DEBUG
-#define D3D_DEBUG_INFO
+#ifndef NOMINMAX
+#define NOMINMAX
 #endif
 
 #include <d3d9.h>
@@ -15,17 +15,123 @@
 #include "tracy/Tracy.hpp"
 #endif
 
+void CKDX9LogPrintf(const char *fmt, ...);
+
+#define CKDX9_LOG(...) CKDX9LogPrintf(__VA_ARGS__)
+
 #define NBTEMPZBUFFER 256
 
-struct TexFromFile
+#define MAX_FVF_DECL_SIZE MAXD3DDECLLENGTH + 1
+
+#define D3DXASM_DEBUG 0x0001
+#define D3DXASM_SKIPVALIDATION 0x0010
+
+#ifdef NDEBUG
+#define D3DXASM_FLAGS 0
+#else
+#define D3D_DEBUG_INFO
+#define D3DXASM_FLAGS D3DXASM_DEBUG
+#endif // NDEBUG
+
+#define D3DX_DEFAULT            ((UINT) -1)
+#define D3DX_DEFAULT_NONPOW2    ((UINT) -2)
+#define D3DX_DEFAULT_FLOAT      FLT_MAX
+#define D3DX_FROM_FILE          ((UINT) -3)
+#define D3DFMT_FROM_FILE        ((D3DFORMAT) -3)
+
+#define D3DX_FILTER_NONE (1 << 0)
+#define D3DX_FILTER_POINT (2 << 0)
+#define D3DX_FILTER_LINEAR (3 << 0)
+#define D3DX_FILTER_TRIANGLE (4 << 0)
+#define D3DX_FILTER_BOX (5 << 0)
+
+#define D3DX_FILTER_MIRROR_U (1 << 16)
+#define D3DX_FILTER_MIRROR_V (2 << 16)
+#define D3DX_FILTER_MIRROR_W (4 << 16)
+#define D3DX_FILTER_MIRROR (7 << 16)
+
+#define D3DX_FILTER_DITHER (1 << 19)
+#define D3DX_FILTER_DITHER_DIFFUSION (2 << 19)
+
+#define D3DX_FILTER_SRGB_IN (1 << 21)
+#define D3DX_FILTER_SRGB_OUT (2 << 21)
+#define D3DX_FILTER_SRGB (3 << 21)
+
+enum D3DXIMAGE_FILEFORMAT
 {
-    VX_PIXELFORMAT Format;
-    int MipLevels;
-    CKDWORD ColorKey; // 0 : No Color Key, 0xFFRRGGBB (R,G,B) color Key
-    CKBOOL IsDynamic;
+    D3DXIFF_BMP = 0,
+    D3DXIFF_JPG = 1,
+    D3DXIFF_TGA = 2,
+    D3DXIFF_PNG = 3,
+    D3DXIFF_DDS = 4,
+    D3DXIFF_PPM = 5,
+    D3DXIFF_DIB = 6,
+    D3DXIFF_HDR = 7, // high dynamic range formats
+    D3DXIFF_PFM = 8, //
+    D3DXIFF_FORCE_DWORD = 0x7fffffff
 };
 
-//---Implemented in CKDX9PixelFormatUtils.cpp :
+struct D3DXMACRO
+{
+    LPCSTR Name;
+    LPCSTR Definition;
+};
+
+struct D3DXIMAGE_INFO
+{
+    UINT Width;
+    UINT Height;
+    UINT Depth;
+    UINT MipLevels;
+    D3DFORMAT Format;
+    D3DRESOURCETYPE ResourceType;
+    D3DXIMAGE_FILEFORMAT ImageFileFormat;
+};
+
+typedef interface ID3DXBuffer *LPD3DXBUFFER;
+typedef interface ID3DXInclude *LPD3DXINCLUDE;
+
+DECLARE_INTERFACE_(ID3DXBuffer, IUnknown)
+{
+    // IUnknown
+    STDMETHOD(QueryInterface)(THIS_ REFIID iid, LPVOID * ppv) PURE;
+    STDMETHOD_(ULONG, AddRef)(THIS) PURE;
+    STDMETHOD_(ULONG, Release)(THIS) PURE;
+
+    // ID3DXBuffer
+    STDMETHOD_(LPVOID, GetBufferPointer)(THIS) PURE;
+    STDMETHOD_(DWORD, GetBufferSize)(THIS) PURE;
+};
+
+typedef HRESULT(WINAPI *PFN_D3DXDeclaratorFromFVF)(DWORD FVF, D3DVERTEXELEMENT9 pDeclarator[MAX_FVF_DECL_SIZE]);
+typedef HRESULT(WINAPI *PFN_D3DXFVFFromDeclarator)(CONST D3DVERTEXELEMENT9 *pDeclarator, DWORD *pFVF);
+typedef HRESULT(WINAPI *PFN_D3DXAssembleShader)(LPCSTR pSrcData, UINT SrcDataLen, const D3DXMACRO *pDefines,
+                                                LPD3DXINCLUDE pInclude, DWORD Flags, LPD3DXBUFFER *ppShader,
+                                                LPD3DXBUFFER *ppErrorMsgs);
+typedef HRESULT(WINAPI *PFN_D3DXDisassembleShader)(const DWORD *pShader, BOOL EnableColorCode, LPCSTR pComments,
+                                                   LPD3DXBUFFER *ppDisassembly);
+typedef HRESULT(WINAPI *PFN_D3DXLoadSurfaceFromSurface)(LPDIRECT3DSURFACE9 pDestSurface,
+                                                        const PALETTEENTRY *pDestPalette, const RECT *pDestRect,
+                                                        LPDIRECT3DSURFACE9 pSrcSurface, const PALETTEENTRY *pSrcPalette,
+                                                        const RECT *pSrcRect, DWORD Filter, D3DCOLOR ColorKey);
+typedef HRESULT(WINAPI *PFN_D3DXLoadSurfaceFromMemory)(LPDIRECT3DSURFACE9 pDestSurface,
+                                                       CONST PALETTEENTRY *pDestPalette, CONST RECT *pDestRect,
+                                                       LPCVOID pSrcMemory, D3DFORMAT SrcFormat, UINT SrcPitch,
+                                                       CONST PALETTEENTRY *pSrcPalette, CONST RECT *pSrcRect,
+                                                       DWORD Filter, D3DCOLOR ColorKey);
+typedef HRESULT(WINAPI *PFN_D3DXCreateTextureFromFileExA)(LPDIRECT3DDEVICE9 pDevice, LPCSTR pSrcFile, UINT Width,
+                                                          UINT Height, UINT MipLevels, DWORD Usage, D3DFORMAT Format,
+                                                          D3DPOOL Pool, DWORD Filter, DWORD MipFilter,
+                                                          D3DCOLOR ColorKey, D3DXIMAGE_INFO *pSrcInfo,
+                                                          PALETTEENTRY *pPalette, LPDIRECT3DTEXTURE9 *ppTexture);
+
+extern PFN_D3DXDeclaratorFromFVF D3DXDeclaratorFromFVF;
+extern PFN_D3DXFVFFromDeclarator D3DXFVFFromDeclarator;
+extern PFN_D3DXAssembleShader D3DXAssembleShader;
+extern PFN_D3DXDisassembleShader D3DXDisassembleShader;
+extern PFN_D3DXLoadSurfaceFromSurface D3DXLoadSurfaceFromSurface;
+extern PFN_D3DXLoadSurfaceFromMemory D3DXLoadSurfaceFromMemory;
+extern PFN_D3DXCreateTextureFromFileExA D3DXCreateTextureFromFileExA;
 
 D3DFORMAT VxPixelFormatToD3DFormat(VX_PIXELFORMAT pf);
 VX_PIXELFORMAT D3DFormatToVxPixelFormat(D3DFORMAT ddpf);
@@ -61,6 +167,14 @@ typedef CKBOOL (*GetDXRenderStateFunc)(CKDX9RasterizerContext *ctx, CKDWORD *Val
         x = NULL;                    \
         XASSERT(refCount == 0);      \
     }
+
+struct TexFromFile
+{
+    VX_PIXELFORMAT Format;
+    int MipLevels;
+    CKDWORD ColorKey; // 0 : No Color Key, 0xFFRRGGBB (R,G,B) color Key
+    CKBOOL IsDynamic;
+};
 
 // Store texture operation required to perform blending between two texture stages
 typedef struct CKStageBlend
@@ -102,6 +216,12 @@ public:
     }
     ~CKDX9TextureDesc()
     {
+        CKDX9_LOG("CKDX9TextureDesc::~CKDX9TextureDesc this=%p flags=0x%08X fmt=%ux%u bpp=%d dx=%p render=%p cube=%p volume=%p locked=%p",
+                  this, Flags, Format.Width, Format.Height, Format.BitsPerPixel,
+                  DxTexture, DxRenderTexture, DxCubeTexture, DxVolumeTexture,
+                  DxLockedSurface);
+        if (DxRenderTexture == DxTexture)
+            DxRenderTexture = NULL;
         SAFERELEASE(DxTexture);
         SAFERELEASE(DxRenderTexture);
         SAFERELEASE(DxLockedSurface);
@@ -212,8 +332,8 @@ public:
     virtual CKBOOL GetRenderState(VXRENDERSTATETYPE State, CKDWORD *Value);
 
     //--- Texture States
-    virtual CKBOOL SetTexture(CKDWORD Texture, int Stage = 0);
-    virtual CKBOOL SetTextureStageState(int Stage, CKRST_TEXTURESTAGESTATETYPE Tss, CKDWORD Value);
+    virtual CKBOOL SetTexture(CKDWORD Texture, CKDWORD Stage = 0);
+    virtual CKBOOL SetTextureStageState(CKDWORD Stage, CKRST_TEXTURESTAGESTATETYPE Tss, CKDWORD Value);
 
     //--- Vertex & Pixel shaders
     virtual CKBOOL SetVertexShader(CKDWORD VShaderIndex);
@@ -229,7 +349,7 @@ public:
                                      CKDWORD VertexCount, CKDWORD StartIndex, int Indexcount);
 
     //--- Creation of Textures, Sprites and Vertex Buffer
-    CKBOOL CreateObject(CKDWORD ObjIndex, CKRST_OBJECTTYPE Type, void *DesiredFormat) override;
+    CKBOOL CreateObject(CKDWORD ObjIndex, CKRST_OBJECTTYPE Type, void *DesiredFormat);
 
     //--- Textures
     virtual CKBOOL LoadTexture(CKDWORD Texture, const VxImageDescEx &SurfDesc, int miplevel = -1);
@@ -275,7 +395,7 @@ public:
 
     //---- To Enable more direct creation of system objects	without
     //---- CK2_3D holding a copy of the texture
-    virtual CKBOOL CreateTextureFromFile(CKDWORD Texture, const char *Filename, TexFromFile *param);
+    virtual CKBOOL CreateTextureFromFile(CKDWORD Texture, CKSTRING Filename, TexFromFile *param);
 
 protected:
     //-----------------------
@@ -283,6 +403,7 @@ protected:
     CKBOOL UpdateDeviceProperties();
     CKBOOL InitializeDeviceStates();
     void DestroyDevice();
+    void PrepareDeviceReset();
     HRESULT ResetDevice();
     void ConfigureMultisampling();
 
