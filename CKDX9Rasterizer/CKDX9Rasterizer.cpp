@@ -8,6 +8,9 @@ PFN_D3DXLoadSurfaceFromSurface D3DXLoadSurfaceFromSurface = NULL;
 PFN_D3DXLoadSurfaceFromMemory D3DXLoadSurfaceFromMemory = NULL;
 PFN_D3DXCreateTextureFromFileExA D3DXCreateTextureFromFileExA = NULL;
 
+HMODULE g_D3DXModule = NULL;
+LONG g_D3DXModuleRefs = 0;
+
 D3DFORMAT VxPixelFormatToD3DFormat(VX_PIXELFORMAT pf)
 {
     switch (pf)
@@ -171,7 +174,7 @@ PLUGIN_EXPORT void CKRasterizerGetInfo(CKRasterizerInfo *info)
     info->Desc = "DirectX 9 Rasterizer";
 }
 
-CKDX9Rasterizer::CKDX9Rasterizer() : m_D3D9(NULL), m_Init(FALSE), m_BlendStages() {}
+CKDX9Rasterizer::CKDX9Rasterizer() : m_Init(FALSE), m_D3D9(NULL), m_D3DXModule(NULL), m_BlendStages() {}
 
 CKDX9Rasterizer::~CKDX9Rasterizer()
 {
@@ -240,11 +243,45 @@ XBOOL CKDX9Rasterizer::Start(WIN_HANDLE AppWnd)
                       D3DXAssembleShader, D3DXDisassembleShader,
                       D3DXLoadSurfaceFromSurface, D3DXLoadSurfaceFromMemory,
                       D3DXCreateTextureFromFileExA);
+            if (!D3DXDeclaratorFromFVF ||
+                !D3DXFVFFromDeclarator ||
+                !D3DXAssembleShader ||
+                !D3DXDisassembleShader ||
+                !D3DXLoadSurfaceFromSurface ||
+                !D3DXLoadSurfaceFromMemory ||
+                !D3DXCreateTextureFromFileExA)
+            {
+                D3DXDeclaratorFromFVF = NULL;
+                D3DXFVFFromDeclarator = NULL;
+                D3DXAssembleShader = NULL;
+                D3DXDisassembleShader = NULL;
+                D3DXLoadSurfaceFromSurface = NULL;
+                D3DXLoadSurfaceFromMemory = NULL;
+                D3DXCreateTextureFromFileExA = NULL;
+                FreeLibrary(module);
+            }
+            else
+            {
+                g_D3DXModule = module;
+            }
         }
         else
         {
             CKDX9_LOG("CKDX9Rasterizer::Start no D3DX 9.38-9.43 module loaded");
         }
+    }
+
+    if (!m_D3DXModule && g_D3DXModule &&
+        D3DXDeclaratorFromFVF &&
+        D3DXFVFFromDeclarator &&
+        D3DXAssembleShader &&
+        D3DXDisassembleShader &&
+        D3DXLoadSurfaceFromSurface &&
+        D3DXLoadSurfaceFromMemory &&
+        D3DXCreateTextureFromFileExA)
+    {
+        m_D3DXModule = g_D3DXModule;
+        InterlockedIncrement(&g_D3DXModuleRefs);
     }
 
     UINT count = m_D3D9->GetAdapterCount();
@@ -302,6 +339,23 @@ void CKDX9Rasterizer::Close()
     {
         CKRasterizerDriver *driver = m_Drivers.PopBack();
         delete driver;
+    }
+
+    if (m_D3DXModule)
+    {
+        if (InterlockedDecrement(&g_D3DXModuleRefs) == 0)
+        {
+            D3DXDeclaratorFromFVF = NULL;
+            D3DXFVFFromDeclarator = NULL;
+            D3DXAssembleShader = NULL;
+            D3DXDisassembleShader = NULL;
+            D3DXLoadSurfaceFromSurface = NULL;
+            D3DXLoadSurfaceFromMemory = NULL;
+            D3DXCreateTextureFromFileExA = NULL;
+            FreeLibrary(g_D3DXModule);
+            g_D3DXModule = NULL;
+        }
+        m_D3DXModule = NULL;
     }
 
     m_Init = FALSE;
