@@ -268,6 +268,7 @@ public:
     virtual ~CKDX9VertexShaderDesc();
     CKDX9VertexShaderDesc()
     {
+        m_FunctionSize = 0;
         DxShader = NULL;
         Owner = NULL;
     }
@@ -287,11 +288,18 @@ public:
     virtual ~CKDX9PixelShaderDesc();
     CKDX9PixelShaderDesc()
     {
+        m_FunctionSize = 0;
         DxShader = NULL;
         Owner = NULL;
     }
 
 } CKDX9PixelShaderDesc;
+
+typedef struct CKDX9TextureStageStateCacheEntry
+{
+    CKDWORD Value;
+    CKBOOL Valid;
+} CKDX9TextureStageStateCacheEntry;
 
 /*****************************************************************
  CKDX9RasterizerContext override
@@ -410,7 +418,7 @@ protected:
     void UpdateDirectXData();
     CKBOOL InternalDrawPrimitiveVB(VXPRIMITIVETYPE pType, CKDX9VertexBufferDesc *VB, CKDWORD StartIndex,
                                    CKDWORD VertexCount, CKWORD *indices, int indexcount, CKBOOL Clip);
-    void SetupStreams(LPDIRECT3DVERTEXBUFFER9 Buffer, CKDWORD VFormat, CKDWORD VOffset, CKDWORD VSize);
+    CKBOOL SetupStreams(LPDIRECT3DVERTEXBUFFER9 Buffer, CKDWORD VFormat, CKDWORD VOffset, CKDWORD VSize);
 
     //--- Objects creation
     CKBOOL CreateTexture(CKDWORD Texture, CKTextureDesc *DesiredFormat);
@@ -423,11 +431,15 @@ protected:
     //---- Cleanup
     void FlushCaches();
     void FlushNonManagedObjects();
+    void RestoreDeviceResources();
     void ReleaseStateBlocks();
     void ReleaseIndexBuffers();
     void ClearStreamCache();
     void ReleaseScreenBackup();
     void ReleaseVertexDeclarations();
+    void ResetTextureStageStateCache();
+    void InvalidateStageBlendCache();
+    void RecordTextureStageState(int Stage, CKRST_TEXTURESTAGESTATETYPE Tss, CKDWORD Value);
 
     CKDWORD DX9PresentInterval(DWORD PresentInterval);
     CKBOOL LoadSurface(const D3DSURFACE_DESC &ddsd, const D3DLOCKED_RECT &LockRect, const VxImageDescEx &SurfDesc);
@@ -459,6 +471,7 @@ public:
     CKDX9IndexBufferDesc *m_IndexBuffer[2]; // Clip/unclipped
 
     int m_CurrentTextureIndex;
+    CKDWORD m_RenderTargetTextureStageMask;
 
     //-----------------------------------------------------
     //--- Render Target if rendering is redirected to a texture
@@ -481,6 +494,12 @@ public:
 
     CKDWORD m_CurrentPixelShaderCache;
 
+    // Pure devices cannot query clip-plane state, so retain values accepted by
+    // SetClipPlane. The mask is cleared whenever the D3D device is initialized
+    // or reset because reset restores the device defaults.
+    VxPlane m_UserClipPlanes[32];
+    CKDWORD m_UserClipPlaneValidMask;
+
     XBitArray m_StateCacheHitMask;
     XBitArray m_StateCacheMissMask;
 
@@ -491,6 +510,10 @@ public:
     LPDIRECT3DSTATEBLOCK9 m_TextureMinFilterStateBlocks[8][8];
     LPDIRECT3DSTATEBLOCK9 m_TextureMagFilterStateBlocks[8][8];
     LPDIRECT3DSTATEBLOCK9 m_TextureMapBlendStateBlocks[10][8];
+    CKDX9TextureStageStateCacheEntry m_TextureStageStateCache[8][CKRST_TSS_MAXSTATE];
+    CKDWORD m_TextureBindingCache[8];
+    CKBOOL m_TextureBindingCacheValid[8];
+    CKBOOL m_TextureStageStateCacheEnabled;
 
     //-----------------------------------------------------
     // + To do texture rendering, Z-buffers are created when

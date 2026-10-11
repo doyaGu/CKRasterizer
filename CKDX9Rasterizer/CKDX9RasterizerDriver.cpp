@@ -1,6 +1,16 @@
 #include "CKDX9Rasterizer.h"
 
-CKDX9RasterizerDriver::CKDX9RasterizerDriver(CKDX9Rasterizer *rst) { m_Owner = rst; }
+CKDX9RasterizerDriver::CKDX9RasterizerDriver(CKDX9Rasterizer *rst) :
+    m_Inited(FALSE),
+    m_AdapterIndex(0),
+    m_DevType(D3DDEVTYPE_HAL),
+    m_D3DCaps(),
+    m_D3DIdentifier(),
+    m_RenderFormats(),
+    m_IsHTL(FALSE)
+{
+    m_Owner = rst;
+}
 
 CKDX9RasterizerDriver::~CKDX9RasterizerDriver() {}
 
@@ -258,7 +268,26 @@ CKBOOL CKDX9RasterizerDriver::InitializeCaps(int AdapterIndex, D3DDEVTYPE DevTyp
         m_3DCaps.TextureFilterCaps |= CKRST_TFILTERCAPS_ANISOTROPIC;
 
     // Copy other capability flags
-    m_3DCaps.TextureCaps = m_D3DCaps.TextureCaps;
+    // D3D9 and CK share most legacy bit values, but 0x4000 means
+    // MIPMAP in D3D9 and unrestricted NPOT in CK. Translate explicitly and
+    // do not advertise volume maps because CKTextureDesc has no volume depth.
+    m_3DCaps.TextureCaps = 0;
+    if ((m_D3DCaps.TextureCaps & D3DPTEXTURECAPS_PERSPECTIVE) != 0)
+        m_3DCaps.TextureCaps |= CKRST_TEXTURECAPS_PERSPECTIVE;
+    if ((m_D3DCaps.TextureCaps & D3DPTEXTURECAPS_POW2) != 0)
+        m_3DCaps.TextureCaps |= CKRST_TEXTURECAPS_POW2;
+    else
+        m_3DCaps.TextureCaps |= CKRST_TEXTURECAPS_NONPOW2;
+    if ((m_D3DCaps.TextureCaps & D3DPTEXTURECAPS_ALPHA) != 0)
+        m_3DCaps.TextureCaps |= CKRST_TEXTURECAPS_ALPHA;
+    if ((m_D3DCaps.TextureCaps & D3DPTEXTURECAPS_SQUAREONLY) != 0)
+        m_3DCaps.TextureCaps |= CKRST_TEXTURECAPS_SQUAREONLY;
+    if ((m_D3DCaps.TextureCaps & D3DPTEXTURECAPS_NONPOW2CONDITIONAL) != 0)
+        m_3DCaps.TextureCaps |= CKRST_TEXTURECAPS_CONDITIONALNONPOW2;
+    if ((m_D3DCaps.TextureCaps & D3DPTEXTURECAPS_PROJECTED) != 0)
+        m_3DCaps.TextureCaps |= CKRST_TEXTURECAPS_PROJECTED;
+    if ((m_D3DCaps.TextureCaps & D3DPTEXTURECAPS_CUBEMAP) != 0)
+        m_3DCaps.TextureCaps |= CKRST_TEXTURECAPS_CUBEMAP;
     m_3DCaps.TextureAddressCaps = m_D3DCaps.TextureAddressCaps;
     m_3DCaps.MiscCaps = m_D3DCaps.PrimitiveMiscCaps;
     m_3DCaps.ZCmpCaps = m_D3DCaps.ZCmpCaps;
