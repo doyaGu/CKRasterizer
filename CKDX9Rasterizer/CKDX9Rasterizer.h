@@ -432,12 +432,12 @@ protected:
     void FlushCaches();
     void FlushNonManagedObjects();
     void RestoreDeviceResources();
-    void ReleaseStateBlocks();
+    void ReleaseSpriteStateBlock();
     void ReleaseIndexBuffers();
     void ClearStreamCache();
     void ReleaseScreenBackup();
     void ReleaseVertexDeclarations();
-    void ResetTextureStageStateCache();
+    void InvalidateDeviceStateCaches();
     void InvalidateStageBlendCache();
     void RecordTextureStageState(int Stage, CKRST_TEXTURESTAGESTATETYPE Tss, CKDWORD Value);
     HRESULT SetD3DSamplerState(int Stage, D3DSAMPLERSTATETYPE State, CKDWORD Value);
@@ -517,9 +517,6 @@ public:
     // Render states which must be disabled or which values must be translated...
     CKDWORD *m_TranslatedRenderStates[VXRENDERSTATE_MAXSTATE];
 
-    LPDIRECT3DSTATEBLOCK9 m_TextureMinFilterStateBlocks[8][8];
-    LPDIRECT3DSTATEBLOCK9 m_TextureMagFilterStateBlocks[8][8];
-    LPDIRECT3DSTATEBLOCK9 m_TextureMapBlendStateBlocks[10][8];
     LPDIRECT3DSTATEBLOCK9 m_SpriteStateBlock;
     CKDX9TextureStageStateCacheEntry m_TextureStageStateCache[8][CKRST_TSS_MAXSTATE];
     CKDX9TextureStageStateCacheEntry m_D3DSamplerStateCache[8][D3DSAMP_DMAPOFFSET + 1];

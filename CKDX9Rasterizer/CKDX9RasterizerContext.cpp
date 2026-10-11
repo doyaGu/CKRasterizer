@@ -15,11 +15,7 @@
 #define LOG_LOADTEXTURE 0
 #define LOG_CREATETEXTURE 0
 #define LOG_DRAWPRIMITIVE 0
-#define LOG_SETTEXURESTAGESTATE 0
-#define LOG_FLUSHCACHES 0
 #define LOG_BATCHSTATS 0
-
-#define USE_D3DSTATEBLOCKS 0
 
 #if STEP
 #include <conio.h>
@@ -49,10 +45,6 @@ int g_dx9LogEnabled = 0;
 FILE *g_dx9Log = NULL;
 CRITICAL_SECTION g_dx9LogLock;
 bool g_dx9LogLockInit = false;
-unsigned int g_dx9TextureStageLogCount = 0;
-unsigned int g_dx9RenderStateLogCount = 0;
-unsigned int g_dx9StageBlendValidateLogCount = 0;
-
 const char *DX9BufferTypeName(VXBUFFER_TYPE buffer)
 {
     switch (buffer) {
@@ -267,7 +259,6 @@ struct DX9SpriteState
     LPDIRECT3DVERTEXBUFFER9 vertexBufferCache;
     CKDWORD vertexSizeCache;
     CKDWORD pixelShaderCache;
-    LPDIRECT3DSTATEBLOCK9 stateBlock;
     IDirect3DBaseTexture9 *texture0;
     IDirect3DVertexBuffer9 *stream0;
     UINT streamOffset;
@@ -287,8 +278,9 @@ struct DX9SpriteState
 CKBOOL DX9RestoreSpriteState(CKDX9RasterizerContext *context,
                              DX9SpriteState &state)
 {
-    HRESULT restoreResult = state.stateBlock->Apply();
-    SAFERELEASE(state.stateBlock);
+    HRESULT restoreResult = context->m_SpriteStateBlock
+                                ? context->m_SpriteStateBlock->Apply()
+                                : D3DERR_INVALIDCALL;
     HRESULT textureResult = S_OK;
     HRESULT streamResult = S_OK;
     if (SUCCEEDED(state.textureResult))
@@ -712,10 +704,7 @@ CKDX9RasterizerContext::CKDX9RasterizerContext(CKDX9RasterizerDriver *driver) :
     memset(m_IndexBuffer, 0, sizeof(m_IndexBuffer));
     memset(m_TranslatedRenderStates, 0, sizeof(m_TranslatedRenderStates));
     memset(m_TempZBuffers, 0, sizeof(m_TempZBuffers));
-    memset(m_TextureMinFilterStateBlocks, 0, sizeof(m_TextureMinFilterStateBlocks));
-    memset(m_TextureMagFilterStateBlocks, 0, sizeof(m_TextureMagFilterStateBlocks));
-    memset(m_TextureMapBlendStateBlocks, 0, sizeof(m_TextureMapBlendStateBlocks));
-    ResetTextureStageStateCache();
+    InvalidateDeviceStateCaches();
     memset(m_UserClipPlanes, 0, sizeof(m_UserClipPlanes));
     ResetDirtyRects();
 
@@ -775,7 +764,7 @@ CKDX9RasterizerContext::~CKDX9RasterizerContext()
     }
 
     // Free state-specific resources
-    ReleaseStateBlocks();
+    ReleaseSpriteStateBlock();
     ReleaseIndexBuffers();
 
     // Release temporary and cached resources that do not depend on Create/Destroy guards.
@@ -1695,20 +1684,6 @@ CKBOOL CKDX9RasterizerContext::SetRenderState(VXRENDERSTATETYPE State, CKDWORD V
         return FALSE;
     }
 
-    const bool criticalState = (State == VXRENDERSTATE_CULLMODE) ||
-                               (State == VXRENDERSTATE_INVERSEWINDING);
-    const bool logState = (g_dx9RenderStateLogCount < 256) &&
-                          (criticalState || g_dx9Frame.frameIndex < 3);
-    if (logState)
-    {
-        ++g_dx9RenderStateLogCount;
-        CKDX9_LOG("SetRenderState request frame=%u state=%u value=%u valid=%d cached=%u hitMask=%d missMask=%d inverse=%d",
-                  g_dx9Frame.frameIndex, (unsigned)State, Value,
-                  m_StateCache[State].Valid, m_StateCache[State].Value,
-                  m_StateCacheHitMask.IsSet(State), m_StateCacheMissMask.IsSet(State),
-                  m_InverseWinding);
-    }
-
     // Check if this state is locked or disabled
     if (m_StateCache[State].Flags != 0)
         return TRUE;
@@ -1731,7 +1706,7 @@ CKBOOL CKDX9RasterizerContext::SetRenderState(VXRENDERSTATETYPE State, CKDWORD V
         if (Value >= 4)
             Value = 0; // Default to VXCULL_NONE
         HRESULT hr = m_Device->SetRenderState(D3DRS_CULLMODE, m_InverseWinding ? VXCullModesInverted[Value] : VXCullModes[Value]);
-        if (FAILED(hr) || logState)
+        if (FAILED(hr))
         {
             CKDX9_LOG("SetRenderState cullmode state=%u value=%u inverse=%d hr=0x%08lX",
                       (unsigned)State, Value, m_InverseWinding, (unsigned long)hr);
@@ -1752,8 +1727,6 @@ CKBOOL CKDX9RasterizerContext::SetRenderState(VXRENDERSTATETYPE State, CKDWORD V
         {
             m_InverseWinding = Value != 0;
             InvalidateStateCache(VXRENDERSTATE_CULLMODE);
-            if (logState)
-                CKDX9_LOG("SetRenderState inverseWinding=%d invalidatedCull", m_InverseWinding);
         }
         m_StateCache[State].Value = Value;
         m_StateCache[State].Valid = TRUE;
@@ -1762,11 +1735,7 @@ CKBOOL CKDX9RasterizerContext::SetRenderState(VXRENDERSTATETYPE State, CKDWORD V
 
     // Check if this state is in the miss mask (states to ignore)
     if (m_StateCacheMissMask.IsSet(State))
-    {
-        if (logState)
-            CKDX9_LOG("SetRenderState ignored by miss mask state=%u value=%u", (unsigned)State, Value);
         return FALSE;
-    }
 
     // Check if this state is in the hit mask (states with special handling)
     if (m_StateCacheHitMask.IsSet(State))
@@ -1782,7 +1751,7 @@ CKBOOL CKDX9RasterizerContext::SetRenderState(VXRENDERSTATETYPE State, CKDWORD V
     //     translatedValue = m_TranslatedRenderStates[State][Value];
 
     HRESULT hr = m_Device->SetRenderState((D3DRENDERSTATETYPE)State, Value);
-    if (FAILED(hr) || logState)
+    if (FAILED(hr))
     {
         CKDX9_LOG("SetRenderState d3d state=%u value=%u hr=0x%08lX",
                   (unsigned)State, Value, (unsigned long)hr);
@@ -1845,8 +1814,6 @@ CKBOOL CKDX9RasterizerContext::SetTexture(CKDWORD Texture, int Stage)
     }
 
     HRESULT hr = S_OK;
-    const bool logTexture = (g_dx9Frame.frameIndex < 3) ||
-                            (Stage == 0 && (g_dx9Frame.frameIndex % 200 == 0));
 
     // Only texture index 0 has the interface-defined "no texture" meaning.
     // Invalid non-zero handles must not silently mutate the current binding.
@@ -1871,60 +1838,15 @@ CKBOOL CKDX9RasterizerContext::SetTexture(CKDWORD Texture, int Stage)
     // Case 1: Disable texturing for this stage.
     if (Texture == 0)
     {
-        DWORD colorOpBefore = 0;
-        DWORD colorArg1Before = 0;
-        DWORD colorArg2Before = 0;
-        DWORD alphaOpBefore = 0;
-        DWORD alphaArg1Before = 0;
-        DWORD alphaArg2Before = 0;
-        if (logTexture)
-        {
-            if (Stage == 0)
-            {
-                m_Device->GetTextureStageState(0, D3DTSS_COLOROP, &colorOpBefore);
-                m_Device->GetTextureStageState(0, D3DTSS_COLORARG1, &colorArg1Before);
-                m_Device->GetTextureStageState(0, D3DTSS_COLORARG2, &colorArg2Before);
-                m_Device->GetTextureStageState(0, D3DTSS_ALPHAOP, &alphaOpBefore);
-                m_Device->GetTextureStageState(0, D3DTSS_ALPHAARG1, &alphaArg1Before);
-                m_Device->GetTextureStageState(0, D3DTSS_ALPHAARG2, &alphaArg2Before);
-            }
-            CKDX9_LOG("SetTexture disable frame=%u stage=%u texture=%u size=%d validPtr=%p flags=0x%08X",
-                      g_dx9Frame.frameIndex, Stage, Texture, m_Textures.Size(),
-                      Texture < m_Textures.Size() ? m_Textures[Texture] : NULL,
-                      (Texture < m_Textures.Size() && m_Textures[Texture]) ? m_Textures[Texture]->Flags : 0);
-            if (Stage == 0)
-            {
-                CKDX9_LOG("SetTexture disable stage0 before colorOp=%lu colorArg1=0x%08lX colorArg2=0x%08lX alphaOp=%lu alphaArg1=0x%08lX alphaArg2=0x%08lX",
-                          (unsigned long)colorOpBefore, (unsigned long)colorArg1Before, (unsigned long)colorArg2Before,
-                          (unsigned long)alphaOpBefore, (unsigned long)alphaArg1Before, (unsigned long)alphaArg2Before);
-            }
-        }
         // Binding and texture-stage configuration are independent parts of
         // the CKRasterizer contract.  Unbinding must not replace the caller's
         // combiner state, because a later SetTexture call is expected to use
         // the previously selected TEXTUREMAPBLEND/STAGEBLEND configuration.
         hr = m_Device->SetTexture(Stage, NULL);
-        if (FAILED(hr) || logTexture)
+        if (FAILED(hr))
         {
-            CKDX9_LOG("SetTexture disable result stage=%u texture=%u hr=0x%08lX", Stage, Texture, (unsigned long)hr);
-            if (logTexture && Stage == 0)
-            {
-                DWORD colorOpAfter = 0;
-                DWORD colorArg1After = 0;
-                DWORD colorArg2After = 0;
-                DWORD alphaOpAfter = 0;
-                DWORD alphaArg1After = 0;
-                DWORD alphaArg2After = 0;
-                m_Device->GetTextureStageState(0, D3DTSS_COLOROP, &colorOpAfter);
-                m_Device->GetTextureStageState(0, D3DTSS_COLORARG1, &colorArg1After);
-                m_Device->GetTextureStageState(0, D3DTSS_COLORARG2, &colorArg2After);
-                m_Device->GetTextureStageState(0, D3DTSS_ALPHAOP, &alphaOpAfter);
-                m_Device->GetTextureStageState(0, D3DTSS_ALPHAARG1, &alphaArg1After);
-                m_Device->GetTextureStageState(0, D3DTSS_ALPHAARG2, &alphaArg2After);
-                CKDX9_LOG("SetTexture disable stage0 after colorOp=%lu colorArg1=0x%08lX colorArg2=0x%08lX alphaOp=%lu alphaArg1=0x%08lX alphaArg2=0x%08lX",
-                          (unsigned long)colorOpAfter, (unsigned long)colorArg1After, (unsigned long)colorArg2After,
-                          (unsigned long)alphaOpAfter, (unsigned long)alphaArg1After, (unsigned long)alphaArg2After);
-            }
+            CKDX9_LOG("SetTexture unbind failed stage=%u hr=0x%08lX",
+                      Stage, (unsigned long)hr);
         }
         if (SUCCEEDED(hr) && Stage < 8)
         {
@@ -1955,18 +1877,14 @@ CKBOOL CKDX9RasterizerContext::SetTexture(CKDWORD Texture, int Stage)
         return FALSE;
     }
 
-    if (logTexture)
-    {
-        CKDX9_LOG("SetTexture bind frame=%u stage=%u texture=%u desc=%p flags=0x%08X fmt=%ux%u bpp=%d dx=%p cube=%p volume=%p render=%p",
-                  g_dx9Frame.frameIndex, Stage, Texture, desc, desc->Flags,
-                  desc->Format.Width, desc->Format.Height, desc->Format.BitsPerPixel,
-                  desc->DxTexture, desc->DxCubeTexture, desc->DxVolumeTexture, desc->DxRenderTexture);
-    }
-
     hr = m_Device->SetTexture(Stage, dxTexture);
 
     if (FAILED(hr))
+    {
+        CKDX9_LOG("SetTexture bind failed stage=%u texture=%u hr=0x%08lX",
+                  Stage, Texture, (unsigned long)hr);
         return FALSE;
+    }
 
     if (Stage < 8)
     {
@@ -1975,12 +1893,10 @@ CKBOOL CKDX9RasterizerContext::SetTexture(CKDWORD Texture, int Stage)
         InvalidateStageBlendCache();
     }
 
-    if (logTexture)
-        CKDX9_LOG("SetTexture success stage=%u texture=%u", Stage, Texture);
     return TRUE;
 }
 
-void CKDX9RasterizerContext::ResetTextureStageStateCache()
+void CKDX9RasterizerContext::InvalidateDeviceStateCaches()
 {
     memset(m_TextureStageStateCache, 0, sizeof(m_TextureStageStateCache));
     memset(m_D3DSamplerStateCache, 0, sizeof(m_D3DSamplerStateCache));
@@ -2160,12 +2076,11 @@ CKBOOL CKDX9RasterizerContext::SetTextureStageState(int Stage, CKRST_TEXTURESTAG
         return FALSE;
     }
 
-    const bool suspiciousFilter = (Tss == CKRST_TSS_MAGFILTER || Tss == CKRST_TSS_MINFILTER) && Value > VXTEXTUREFILTER_ANISOTROPIC;
-    const bool suspiciousBlend = Tss == CKRST_TSS_TEXTUREMAPBLEND && Value >= VXTEXTUREBLEND_MAX;
-    const bool keyTss = Tss == CKRST_TSS_TEXTUREMAPBLEND || Tss == CKRST_TSS_STAGEBLEND ||
-                        Tss == CKRST_TSS_MAGFILTER || Tss == CKRST_TSS_MINFILTER;
-    const bool logTss = suspiciousFilter || suspiciousBlend ||
-                        (keyTss && g_dx9TextureStageLogCount < 128);
+    const bool suspiciousFilter =
+        (Tss == CKRST_TSS_MAGFILTER || Tss == CKRST_TSS_MINFILTER) &&
+        Value > VXTEXTUREFILTER_ANISOTROPIC;
+    const bool suspiciousBlend =
+        Tss == CKRST_TSS_TEXTUREMAPBLEND && Value >= VXTEXTUREBLEND_MAX;
 
     if (suspiciousFilter)
     {
@@ -2177,13 +2092,6 @@ CKBOOL CKDX9RasterizerContext::SetTextureStageState(int Stage, CKRST_TEXTURESTAG
         CKDX9_LOG("SetTextureStageState suspicious blend value stage=%u value=%u maxExclusive=%u",
                   Stage, Value, (unsigned)VXTEXTUREBLEND_MAX);
     }
-    if (logTss)
-    {
-        ++g_dx9TextureStageLogCount;
-        CKDX9_LOG("SetTextureStageState request frame=%u stage=%u tss=%u value=%u",
-                  g_dx9Frame.frameIndex, Stage, (unsigned)Tss, Value);
-    }
-
     if (suspiciousFilter || suspiciousBlend)
         return FALSE;
 
@@ -2228,18 +2136,6 @@ CKBOOL CKDX9RasterizerContext::SetTextureStageState(int Stage, CKRST_TEXTURESTAG
             break;
         case CKRST_TSS_MAGFILTER:
             {
-                LPDIRECT3DSTATEBLOCK9 block = m_TextureMagFilterStateBlocks[Value][Stage];
-                if (block)
-                {
-                    hr = block->Apply();
-                    if (SUCCEEDED(hr))
-                        RecordTextureStageState(Stage, Tss, Value);
-                    else
-                        memset(m_TextureStageStateCache[Stage], 0,
-                               sizeof(m_TextureStageStateCache[Stage]));
-                    return SUCCEEDED(hr);
-                }
-
                 switch (Value)
                 {
                     case VXTEXTUREFILTER_NEAREST:
@@ -2263,18 +2159,6 @@ CKBOOL CKDX9RasterizerContext::SetTextureStageState(int Stage, CKRST_TEXTURESTAG
             break;
         case CKRST_TSS_MINFILTER:
             {
-                LPDIRECT3DSTATEBLOCK9 block = m_TextureMinFilterStateBlocks[Value][Stage];
-                if (block)
-                {
-                    hr = block->Apply();
-                    if (SUCCEEDED(hr))
-                        RecordTextureStageState(Stage, Tss, Value);
-                    else
-                        memset(m_TextureStageStateCache[Stage], 0,
-                               sizeof(m_TextureStageStateCache[Stage]));
-                    return SUCCEEDED(hr);
-                }
-
                 switch (Value)
                 {
                     case VXTEXTUREFILTER_NEAREST:
@@ -2312,23 +2196,6 @@ CKBOOL CKDX9RasterizerContext::SetTextureStageState(int Stage, CKRST_TEXTURESTAG
             }
             break;
         case CKRST_TSS_TEXTUREMAPBLEND:
-            {
-                LPDIRECT3DSTATEBLOCK9 block = m_TextureMapBlendStateBlocks[Value][Stage];
-                if (block)
-                {
-                    hr = block->Apply();
-#if LOGGING && LOG_SETTEXURESTAGESTATE
-                    fprintf(stderr, "Applying TextureMapBlendStateBlocks Value %d Stage %d -> 0x%x\n", Value, Stage, hr);
-#endif
-                    if (SUCCEEDED(hr))
-                        RecordTextureStageState(Stage, Tss, Value);
-                    else
-                        memset(m_TextureStageStateCache[Stage], 0,
-                               sizeof(m_TextureStageStateCache[Stage]));
-                    return SUCCEEDED(hr);
-                }
-            }
-
             switch (Value)
             {
                 case 0:
@@ -2416,9 +2283,8 @@ CKBOOL CKDX9RasterizerContext::SetTextureStageState(int Stage, CKRST_TEXTURESTAG
                 const CKDWORD stageBeforeValidate = Stage;
                 DWORD passes = 0;
                 HRESULT validateHr = m_Device->ValidateDevice(&passes);
-                if (FAILED(validateHr) || g_dx9StageBlendValidateLogCount < 64)
+                if (FAILED(validateHr))
                 {
-                    ++g_dx9StageBlendValidateLogCount;
                     CKDX9_LOG("SetTextureStageState stageblend ValidateDevice stage=%u passes=%lu value=%u hr=0x%08lX",
                               stageBeforeValidate, (unsigned long)passes, Value, (unsigned long)validateHr);
                 }
@@ -3855,20 +3721,6 @@ CKBOOL CKDX9RasterizerContext::DrawSprite(CKDWORD Sprite, VxRect *src, VxRect *d
     if (!sprite || sprite->Textures.IsEmpty())
         return FALSE;
 
-    const bool spriteLog = (g_dx9Frame.frameIndex < 3) ||
-                           (g_dx9Frame.frameIndex % 200 == 0 && g_dx9Frame.drawSprites <= 6);
-    if (spriteLog)
-    {
-        CKDX9_LOG("DrawSprite[frame=%u,#%u] idx=%u src=(%.1f,%.1f %.1fx%.1f) dst=(%.1f,%.1f %.1fx%.1f) fmt=%ux%u bpp=%d textures=%d tex0idx=%d ctx=%ux%u",
-                  g_dx9Frame.frameIndex, g_dx9Frame.drawSprites, Sprite,
-                  src->left, src->top, src->right - src->left, src->bottom - src->top,
-                  dst->left, dst->top, dst->right - dst->left, dst->bottom - dst->top,
-                  sprite->Format.Width, sprite->Format.Height, sprite->Format.BitsPerPixel,
-                  (int)sprite->Textures.Size(),
-                  sprite->Textures.Size() > 0 ? (int)sprite->Textures[0].IndexTexture : -1,
-                  m_Width, m_Height);
-    }
-
     // Basic boundary checks with early exit
     if (src->GetWidth() <= 0.0f || src->GetHeight() <= 0.0f ||
         dst->GetWidth() <= 0.0f || dst->GetHeight() <= 0.0f ||
@@ -3877,13 +3729,6 @@ CKBOOL CKDX9RasterizerContext::DrawSprite(CKDWORD Sprite, VxRect *src, VxRect *d
         dst->right < 0.0f || dst->bottom < 0.0f ||
         m_Width <= dst->left || m_Height <= dst->top)
     {
-        if (spriteLog)
-        {
-            CKDX9_LOG("DrawSprite REJECTED: fmt=%ux%u ctx=%ux%u src=(%g %g %g %g) dst=(%g %g %g %g)",
-                      sprite->Format.Width, sprite->Format.Height, m_Width, m_Height,
-                      src->left, src->top, src->right, src->bottom,
-                      dst->left, dst->top, dst->right, dst->bottom);
-        }
         return FALSE;
     }
 
@@ -3913,7 +3758,6 @@ CKBOOL CKDX9RasterizerContext::DrawSprite(CKDWORD Sprite, VxRect *src, VxRect *d
     savedSpriteState.vertexBufferCache = m_CurrentVertexBufferCache;
     savedSpriteState.vertexSizeCache = m_CurrentVertexSizeCache;
     savedSpriteState.pixelShaderCache = m_CurrentPixelShaderCache;
-    savedSpriteState.stateBlock = NULL;
     savedSpriteState.texture0 = NULL;
     savedSpriteState.stream0 = NULL;
     savedSpriteState.streamOffset = 0;
@@ -3933,9 +3777,6 @@ CKBOOL CKDX9RasterizerContext::DrawSprite(CKDWORD Sprite, VxRect *src, VxRect *d
         SAFERELEASE(m_SpriteStateBlock);
         return FALSE;
     }
-    savedSpriteState.stateBlock = m_SpriteStateBlock;
-    savedSpriteState.stateBlock->AddRef();
-
     savedSpriteState.textureResult =
         m_Device->GetTexture(0, &savedSpriteState.texture0);
     savedSpriteState.streamResult =
@@ -4013,12 +3854,6 @@ CKBOOL CKDX9RasterizerContext::DrawSprite(CKDWORD Sprite, VxRect *src, VxRect *d
     // Calculate scaling ratios
     const float widthRatio = dst->GetWidth() / src->GetWidth();
     const float heightRatio = dst->GetHeight() / src->GetHeight();
-    if (spriteLog)
-    {
-        CKDX9_LOG("DrawSprite SCALE widthRatio=%.6f heightRatio=%.6f",
-                  widthRatio, heightRatio);
-    }
-
     // ----- BATCH RENDERING IMPLEMENTATION -----
 
     // Step 1: Define a structure to hold fragment data
@@ -4090,19 +3925,6 @@ CKBOOL CKDX9RasterizerContext::DrawSprite(CKDWORD Sprite, VxRect *src, VxRect *d
             const float clippedTop = src->top - ty;
             fragment.TexV1 = clippedTop / it->sh;
             fragment.ScreenTop = dst->top;
-        }
-
-        if (spriteLog && visibleFragments.Size() < 8)
-        {
-            CKDX9_LOG("DrawSprite SUB idx=%u tex=%u pos=(%d,%d) wh=%dx%d storage=%dx%d screen=(%.3f,%.3f %.3fx%.3f) uv=(%.6f,%.6f %.6fx%.6f)",
-                      Sprite, it->IndexTexture,
-                      it->x, it->y, it->w, it->h, it->sw, it->sh,
-                      fragment.ScreenLeft, fragment.ScreenTop,
-                      fragment.ScreenRight - fragment.ScreenLeft,
-                      fragment.ScreenBottom - fragment.ScreenTop,
-                      fragment.TexU1, fragment.TexV1,
-                      fragment.TexU2 - fragment.TexU1,
-                      fragment.TexV2 - fragment.TexV1);
         }
 
         // Add to visible fragments list
@@ -5827,7 +5649,7 @@ void CKDX9RasterizerContext::PrepareDeviceReset()
               m_DefaultBackBuffer, m_DefaultDepthBuffer, m_ScreenBackup, m_CurrentTextureIndex);
 
     ReleaseVertexDeclarations();
-    ReleaseStateBlocks();
+    ReleaseSpriteStateBlock();
     FlushNonManagedObjects();
     ClearStreamCache();
 
@@ -5859,7 +5681,7 @@ HRESULT CKDX9RasterizerContext::ResetDevice()
     // Reset restores D3D's default state, so values cached for the old device
     // state must not suppress the initialization calls below.
     FlushRenderStateCache();
-    ResetTextureStageStateCache();
+    InvalidateDeviceStateCaches();
     m_InverseWinding = FALSE;
 
     // Update device properties
@@ -7057,87 +6879,13 @@ void CKDX9RasterizerContext::FlushCaches()
 #endif
     // Reset render state cache
     FlushRenderStateCache();
-    ResetTextureStageStateCache();
+    InvalidateDeviceStateCaches();
     m_TextureStageStateCacheEnabled = FALSE;
     m_InverseWinding = FALSE;
 
-    // First release any existing state blocks to prevent memory leaks
-    ReleaseStateBlocks();
-
-#if USE_D3DSTATEBLOCKS
-    // Only proceed if device is valid and in a usable state
-    if (!m_Device || FAILED(m_Device->TestCooperativeLevel()))
-        return;
-
-    HRESULT hr;
-
-    // Create new state blocks for texture filtering and blending operations
-    for (int i = 0; i < 8; i++) // For each texture stage
-    {
-        for (int j = 0; j < 8; j++) // For each filter type
-        {
-            // Create min filter state blocks
-            hr = m_Device->BeginStateBlock();
-            if (SUCCEEDED(hr))
-            {
-#if LOGGING && LOG_FLUSHCACHES
-                fprintf(stderr, "begin TextureMinFilterStateBlocks %d %d -> 0x%x\n", i, j, hr);
-#endif
-                SetTextureStageState(i, CKRST_TSS_MINFILTER, j);
-                hr = m_Device->EndStateBlock(&m_TextureMinFilterStateBlocks[j][i]);
-
-#if LOGGING && LOG_FLUSHCACHES
-                fprintf(stderr, "end TextureMinFilterStateBlocks %d %d -> 0x%x\n", i, j, hr);
-#endif
-
-                // If EndStateBlock failed, ensure pointer is NULL
-                if (FAILED(hr))
-                    m_TextureMinFilterStateBlocks[j][i] = NULL;
-            }
-
-            // Create mag filter state blocks
-            hr = m_Device->BeginStateBlock();
-            if (SUCCEEDED(hr))
-            {
-#if LOGGING && LOG_FLUSHCACHES
-                fprintf(stderr, "begin TextureMagFilterStateBlocks %d %d -> 0x%x\n", i, j, hr);
-#endif
-                SetTextureStageState(i, CKRST_TSS_MAGFILTER, j);
-                hr = m_Device->EndStateBlock(&m_TextureMagFilterStateBlocks[j][i]);
-
-#if LOGGING && LOG_FLUSHCACHES
-                fprintf(stderr, "end TextureMagFilterStateBlocks %d %d -> 0x%x\n", i, j, hr);
-#endif
-
-                // If EndStateBlock failed, ensure pointer is NULL
-                if (FAILED(hr))
-                    m_TextureMagFilterStateBlocks[j][i] = NULL;
-            }
-        }
-
-        // Create texture map blend state blocks
-        for (int k = 0; k < 10; k++)
-        {
-            hr = m_Device->BeginStateBlock();
-            if (SUCCEEDED(hr))
-            {
-#if LOGGING && LOG_FLUSHCACHES
-                fprintf(stderr, "begin TextureMapBlendStateBlocks %d %d -> 0x%x\n", i, k, hr);
-#endif
-                SetTextureStageState(i, CKRST_TSS_TEXTUREMAPBLEND, k);
-                hr = m_Device->EndStateBlock(&m_TextureMapBlendStateBlocks[k][i]);
-
-#if LOGGING && LOG_FLUSHCACHES
-                fprintf(stderr, "end TextureMapBlendStateBlocks %d %d -> 0x%x\n", i, k, hr);
-#endif
-
-                // If EndStateBlock failed, ensure pointer is NULL
-                if (FAILED(hr))
-                    m_TextureMapBlendStateBlocks[k][i] = NULL;
-            }
-        }
-    }
-#endif
+    // The sprite state block captures device state and must not outlive a
+    // cache flush or device reset.
+    ReleaseSpriteStateBlock();
     m_TextureStageStateCacheEnabled = TRUE;
 }
 
@@ -7275,7 +7023,7 @@ void CKDX9RasterizerContext::FlushNonManagedObjects()
 
     // Reset vertex format cache
     ClearStreamCache();
-    ResetTextureStageStateCache();
+    InvalidateDeviceStateCaches();
 }
 
 void CKDX9RasterizerContext::RestoreDeviceResources()
@@ -7295,29 +7043,9 @@ void CKDX9RasterizerContext::RestoreDeviceResources()
     }
 }
 
-void CKDX9RasterizerContext::ReleaseStateBlocks()
+void CKDX9RasterizerContext::ReleaseSpriteStateBlock()
 {
     SAFERELEASE(m_SpriteStateBlock);
-    if (m_Device)
-    {
-        for (int i = 0; i < 8; i++)
-        {
-            for (int j = 0; j < 8; j++)
-            {
-                SAFERELEASE(m_TextureMinFilterStateBlocks[j][i]);
-                SAFERELEASE(m_TextureMagFilterStateBlocks[j][i]);
-            }
-
-            for (int k = 0; k < 10; k++)
-            {
-                SAFERELEASE(m_TextureMapBlendStateBlocks[k][i]);
-            }
-        }
-
-        memset(m_TextureMinFilterStateBlocks, 0, sizeof(m_TextureMinFilterStateBlocks));
-        memset(m_TextureMagFilterStateBlocks, 0, sizeof(m_TextureMagFilterStateBlocks));
-        memset(m_TextureMapBlendStateBlocks, 0, sizeof(m_TextureMapBlendStateBlocks));
-    }
 }
 
 void CKDX9RasterizerContext::ReleaseIndexBuffers()
