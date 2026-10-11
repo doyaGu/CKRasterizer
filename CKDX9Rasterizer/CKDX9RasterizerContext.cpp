@@ -19,7 +19,7 @@
 #define LOG_FLUSHCACHES 0
 #define LOG_BATCHSTATS 0
 
-#define USE_D3DSTATEBLOCKS 1
+#define USE_D3DSTATEBLOCKS 0
 
 #if STEP
 #include <conio.h>
@@ -223,20 +223,6 @@ bool DX9ValidateImageDesc(const VxImageDescEx &desc)
            rowCount <= DX9_SIZE_MAX / sourcePitch;
 }
 
-void DX9SetSamplerState(IDirect3DDevice9 *device, HRESULT &hr, DWORD stage,
-                        D3DSAMPLERSTATETYPE state, DWORD value)
-{
-    if (SUCCEEDED(hr))
-        hr = device->SetSamplerState(stage, state, value);
-}
-
-void DX9SetTextureStageState(IDirect3DDevice9 *device, HRESULT &hr, DWORD stage,
-                             D3DTEXTURESTAGESTATETYPE state, DWORD value)
-{
-    if (SUCCEEDED(hr))
-        hr = device->SetTextureStageState(stage, state, value);
-}
-
 CKBOOL DX9FailSetTargetTexture(CKDX9RasterizerContext *context,
                                CKDWORD textureObject,
                                CKDX9TextureDesc *desc,
@@ -290,6 +276,10 @@ struct DX9SpriteState
     HRESULT streamResult;
     CKDX9TextureStageStateCacheEntry
         textureStageStateCache[8][CKRST_TSS_MAXSTATE];
+    CKDX9TextureStageStateCacheEntry
+        d3dSamplerStateCache[8][D3DSAMP_DMAPOFFSET + 1];
+    CKDX9TextureStageStateCacheEntry
+        d3dTextureStageStateCache[8][D3DTSS_CONSTANT + 1];
     CKDWORD textureBindingCache[8];
     CKBOOL textureBindingCacheValid[8];
 };
@@ -322,6 +312,10 @@ CKBOOL DX9RestoreSpriteState(CKDX9RasterizerContext *context,
     context->m_CurrentPixelShaderCache = state.pixelShaderCache;
     memcpy(context->m_TextureStageStateCache, state.textureStageStateCache,
            sizeof(state.textureStageStateCache));
+    memcpy(context->m_D3DSamplerStateCache, state.d3dSamplerStateCache,
+           sizeof(state.d3dSamplerStateCache));
+    memcpy(context->m_D3DTextureStageStateCache, state.d3dTextureStageStateCache,
+           sizeof(state.d3dTextureStageStateCache));
     memcpy(context->m_TextureBindingCache, state.textureBindingCache,
            sizeof(state.textureBindingCache));
     memcpy(context->m_TextureBindingCacheValid, state.textureBindingCacheValid,
@@ -700,9 +694,17 @@ CKDX9RasterizerContext::CKDX9RasterizerContext(CKDX9RasterizerDriver *driver) :
     m_CurrentVertexBufferCache(NULL),
     m_CurrentVertexSizeCache(0),
     m_CurrentPixelShaderCache(0),
+    m_CurrentIndexBufferCache(NULL),
+    m_CurrentIndexBufferCacheValid(FALSE),
+    m_MaterialCacheValid(FALSE),
+    m_ViewportCacheValid(FALSE),
+    m_LightCacheValidMask(0),
+    m_LightEnableCacheValidMask(0),
+    m_LightEnableCacheMask(0),
     m_UserClipPlaneValidMask(0),
     m_StateCacheHitMask(),
     m_StateCacheMissMask(),
+    m_SpriteStateBlock(NULL),
     m_TextureStageStateCacheEnabled(FALSE),
     m_Owner(NULL)
 {
@@ -751,7 +753,7 @@ CKDX9RasterizerContext::~CKDX9RasterizerContext()
         }
 
         // Clear index buffer binding
-        m_Device->SetIndices(NULL);
+        SetD3DIndices(NULL);
 
         // Clear vertex stream bindings
         for (UINT i = 0; i < 8; i++)
@@ -1231,8 +1233,12 @@ CKBOOL CKDX9RasterizerContext::BackToFront(CKBOOL vsync)
 #ifdef TRACY_ENABLE
     ZoneScopedN(__FUNCTION__);
 #endif
-    CKDX9_LOG("BackToFront[frame=%u] vsync=%d drawS=%u loadTex=%u",
-              g_dx9Frame.frameIndex, vsync, g_dx9Frame.drawSprites, g_dx9Frame.loadTextures);
+    if ((g_dx9Frame.frameIndex & 1023u) == 0)
+    {
+        CKDX9_LOG("BackToFront[frame=%u] vsync=%d drawS=%u loadTex=%u",
+                  g_dx9Frame.frameIndex, vsync, g_dx9Frame.drawSprites,
+                  g_dx9Frame.loadTextures);
+    }
     ++g_dx9Frame.frameIndex;
     g_dx9Frame.drawSprites = 0;
     g_dx9Frame.loadTextures = 0;
@@ -1388,6 +1394,13 @@ CKBOOL CKDX9RasterizerContext::SetLight(CKDWORD Light, CKLightData *data)
     if (!m_Device || !data || Light >= RST_MAX_LIGHT)
         return FALSE;
 
+    const CKDWORD lightMask = 1u << Light;
+    if ((m_LightCacheValidMask & lightMask) != 0 &&
+        memcmp(&m_CurrentLightData[Light], data, sizeof(*data)) == 0)
+    {
+        return TRUE;
+    }
+
     D3DLIGHT9 light;
     light.Type = (D3DLIGHTTYPE)data->Type;
     light.Range = data->Range;
@@ -1433,6 +1446,7 @@ CKBOOL CKDX9RasterizerContext::SetLight(CKDWORD Light, CKLightData *data)
         return FALSE;
 
     m_CurrentLightData[Light] = *data;
+    m_LightCacheValidMask |= lightMask;
     return TRUE;
 }
 
@@ -1444,7 +1458,28 @@ CKBOOL CKDX9RasterizerContext::EnableLight(CKDWORD Light, CKBOOL Enable)
     if (!m_Device || Light >= RST_MAX_LIGHT)
         return FALSE;
 
-    return SUCCEEDED(m_Device->LightEnable(Light, Enable));
+    const CKDWORD lightMask = 1u << Light;
+    const CKBOOL normalizedEnable = Enable != FALSE;
+    if ((m_LightEnableCacheValidMask & lightMask) != 0 &&
+        (((m_LightEnableCacheMask & lightMask) != 0) ==
+         (normalizedEnable != FALSE)))
+    {
+        return TRUE;
+    }
+
+    const HRESULT hr = m_Device->LightEnable(Light, normalizedEnable);
+    if (FAILED(hr))
+    {
+        m_LightEnableCacheValidMask &= ~lightMask;
+        return FALSE;
+    }
+
+    if (normalizedEnable)
+        m_LightEnableCacheMask |= lightMask;
+    else
+        m_LightEnableCacheMask &= ~lightMask;
+    m_LightEnableCacheValidMask |= lightMask;
+    return TRUE;
 }
 
 CKBOOL CKDX9RasterizerContext::SetMaterial(CKMaterialData *mat)
@@ -1457,6 +1492,12 @@ CKBOOL CKDX9RasterizerContext::SetMaterial(CKMaterialData *mat)
 
     if (!mat)
         return FALSE;
+
+    if (m_MaterialCacheValid &&
+        memcmp(&m_CurrentMaterialData, mat, sizeof(*mat)) == 0)
+    {
+        return TRUE;
+    }
 
     D3DMATERIAL9 d3dMat;
     d3dMat.Diffuse.r = mat->Diffuse.r;
@@ -1485,6 +1526,7 @@ CKBOOL CKDX9RasterizerContext::SetMaterial(CKMaterialData *mat)
         return FALSE;
 
     m_CurrentMaterialData = *mat;
+    m_MaterialCacheValid = TRUE;
     return TRUE;
 }
 
@@ -1534,6 +1576,13 @@ CKBOOL CKDX9RasterizerContext::SetViewport(CKViewportData *data)
         return FALSE;
     }
 
+    if (m_ViewportCacheValid &&
+        memcmp(&m_ViewportData, &appliedViewport,
+               sizeof(appliedViewport)) == 0)
+    {
+        return TRUE;
+    }
+
     D3DVIEWPORT9 d3dViewport;
     d3dViewport.X = static_cast<DWORD>(appliedViewport.ViewX);
     d3dViewport.Y = static_cast<DWORD>(appliedViewport.ViewY);
@@ -1546,6 +1595,7 @@ CKBOOL CKDX9RasterizerContext::SetViewport(CKViewportData *data)
         return FALSE;
 
     m_ViewportData = appliedViewport;
+    m_ViewportCacheValid = TRUE;
     return TRUE;
 }
 
@@ -1933,8 +1983,108 @@ CKBOOL CKDX9RasterizerContext::SetTexture(CKDWORD Texture, int Stage)
 void CKDX9RasterizerContext::ResetTextureStageStateCache()
 {
     memset(m_TextureStageStateCache, 0, sizeof(m_TextureStageStateCache));
+    memset(m_D3DSamplerStateCache, 0, sizeof(m_D3DSamplerStateCache));
+    memset(m_D3DTextureStageStateCache, 0,
+           sizeof(m_D3DTextureStageStateCache));
     memset(m_TextureBindingCache, 0, sizeof(m_TextureBindingCache));
     memset(m_TextureBindingCacheValid, 0, sizeof(m_TextureBindingCacheValid));
+    m_CurrentIndexBufferCache = NULL;
+    m_CurrentIndexBufferCacheValid = FALSE;
+    m_MaterialCacheValid = FALSE;
+    m_ViewportCacheValid = FALSE;
+    m_LightCacheValidMask = 0;
+    m_LightEnableCacheValidMask = 0;
+    m_LightEnableCacheMask = 0;
+}
+
+HRESULT CKDX9RasterizerContext::SetD3DSamplerState(
+    int Stage, D3DSAMPLERSTATETYPE State, CKDWORD Value)
+{
+    if (!m_Device || Stage < 0 || Stage >= 8 ||
+        State < D3DSAMP_ADDRESSU || State > D3DSAMP_DMAPOFFSET)
+    {
+        return D3DERR_INVALIDCALL;
+    }
+
+    CKDX9TextureStageStateCacheEntry &entry =
+        m_D3DSamplerStateCache[Stage][State];
+    if (m_TextureStageStateCacheEnabled && entry.Valid &&
+        entry.Value == Value)
+    {
+        return S_OK;
+    }
+
+    const HRESULT hr = m_Device->SetSamplerState(Stage, State, Value);
+    if (SUCCEEDED(hr) && m_TextureStageStateCacheEnabled)
+    {
+        entry.Value = Value;
+        entry.Valid = TRUE;
+    }
+    else if (FAILED(hr))
+    {
+        entry.Valid = FALSE;
+        CKDX9_LOG("SetD3DSamplerState failed stage=%u state=%u value=%u hr=0x%08lX",
+                  Stage, (unsigned)State, Value, (unsigned long)hr);
+    }
+    return hr;
+}
+
+HRESULT CKDX9RasterizerContext::SetD3DTextureStageState(
+    int Stage, D3DTEXTURESTAGESTATETYPE State, CKDWORD Value)
+{
+    if (!m_Device || Stage < 0 || Stage >= 8 ||
+        State < D3DTSS_COLOROP || State > D3DTSS_CONSTANT)
+    {
+        return D3DERR_INVALIDCALL;
+    }
+
+    CKDX9TextureStageStateCacheEntry &entry =
+        m_D3DTextureStageStateCache[Stage][State];
+    if (m_TextureStageStateCacheEnabled && entry.Valid &&
+        entry.Value == Value)
+    {
+        return S_OK;
+    }
+
+    const HRESULT hr = m_Device->SetTextureStageState(Stage, State, Value);
+    if (SUCCEEDED(hr) && m_TextureStageStateCacheEnabled)
+    {
+        entry.Value = Value;
+        entry.Valid = TRUE;
+    }
+    else if (FAILED(hr))
+    {
+        entry.Valid = FALSE;
+        CKDX9_LOG("SetD3DTextureStageState failed stage=%u state=%u value=%u hr=0x%08lX",
+                  Stage, (unsigned)State, Value, (unsigned long)hr);
+    }
+    return hr;
+}
+
+HRESULT CKDX9RasterizerContext::SetD3DIndices(
+    LPDIRECT3DINDEXBUFFER9 Buffer)
+{
+    if (!m_Device)
+        return D3DERR_INVALIDCALL;
+
+    if (m_CurrentIndexBufferCacheValid &&
+        m_CurrentIndexBufferCache == Buffer)
+    {
+        return S_OK;
+    }
+
+    const HRESULT hr = m_Device->SetIndices(Buffer);
+    if (SUCCEEDED(hr))
+    {
+        m_CurrentIndexBufferCache = Buffer;
+        m_CurrentIndexBufferCacheValid = TRUE;
+    }
+    else
+    {
+        m_CurrentIndexBufferCache = NULL;
+        m_CurrentIndexBufferCacheValid = FALSE;
+    }
+    return hr;
 }
 
 void CKDX9RasterizerContext::InvalidateStageBlendCache()
@@ -2053,9 +2203,9 @@ CKBOOL CKDX9RasterizerContext::SetTextureStageState(int Stage, CKRST_TEXTURESTAG
     // Preserve the first device failure instead of overwriting it with the
     // result of a later state call.
 #define setSamplerState(state, value) \
-    DX9SetSamplerState(m_Device, hr, Stage, state, value)
+    do { if (SUCCEEDED(hr)) hr = SetD3DSamplerState(Stage, state, value); } while (0)
 #define setTextureStageState(state, value) \
-    DX9SetTextureStageState(m_Device, hr, Stage, state, value)
+    do { if (SUCCEEDED(hr)) hr = SetD3DTextureStageState(Stage, state, value); } while (0)
 
     switch (Tss)
     {
@@ -2181,6 +2331,10 @@ CKBOOL CKDX9RasterizerContext::SetTextureStageState(int Stage, CKRST_TEXTURESTAG
 
             switch (Value)
             {
+                case 0:
+                    setTextureStageState(D3DTSS_COLOROP, D3DTOP_DISABLE);
+                    setTextureStageState(D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+                    break;
                 case VXTEXTUREBLEND_DECAL:
                 case VXTEXTUREBLEND_COPY:
                     setTextureStageState(D3DTSS_COLOROP, D3DTOP_SELECTARG1);
@@ -2270,8 +2424,8 @@ CKBOOL CKDX9RasterizerContext::SetTextureStageState(int Stage, CKRST_TEXTURESTAG
                 }
                 if (FAILED(validateHr))
                 {
-                    m_Device->SetTextureStageState(Stage, D3DTSS_COLOROP, D3DTOP_DISABLE);
-                    m_Device->SetTextureStageState(Stage, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+                    SetD3DTextureStageState(Stage, D3DTSS_COLOROP, D3DTOP_DISABLE);
+                    SetD3DTextureStageState(Stage, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
                     memset(m_TextureStageStateCache[Stage], 0,
                            sizeof(m_TextureStageStateCache[Stage]));
                     return FALSE;
@@ -2283,7 +2437,8 @@ CKBOOL CKDX9RasterizerContext::SetTextureStageState(int Stage, CKRST_TEXTURESTAG
             }
             break;
         default:
-            hr = m_Device->SetTextureStageState(Stage, (D3DTEXTURESTAGESTATETYPE)Tss, Value);
+            hr = SetD3DTextureStageState(
+                Stage, (D3DTEXTURESTAGESTATETYPE)Tss, Value);
             if (FAILED(hr))
             {
                 CKDX9_LOG("SetTextureStageState default failed stage=%u tss=%u value=%u hr=0x%08lX",
@@ -2674,7 +2829,7 @@ CKBOOL CKDX9RasterizerContext::DrawPrimitiveVBIB(VXPRIMITIVETYPE pType, CKDWORD 
         return FALSE;
 
     // Set index buffer
-    HRESULT hr = m_Device->SetIndices(indexBufferDesc->DxBuffer);
+    HRESULT hr = SetD3DIndices(indexBufferDesc->DxBuffer);
     if (FAILED(hr))
         return FALSE;
 
@@ -3743,6 +3898,11 @@ CKBOOL CKDX9RasterizerContext::DrawSprite(CKDWORD Sprite, VxRect *src, VxRect *d
     memcpy(savedSpriteState.stateCache, m_StateCache, sizeof(savedSpriteState.stateCache));
     memcpy(savedSpriteState.textureStageStateCache, m_TextureStageStateCache,
            sizeof(savedSpriteState.textureStageStateCache));
+    memcpy(savedSpriteState.d3dSamplerStateCache, m_D3DSamplerStateCache,
+           sizeof(savedSpriteState.d3dSamplerStateCache));
+    memcpy(savedSpriteState.d3dTextureStageStateCache,
+           m_D3DTextureStageStateCache,
+           sizeof(savedSpriteState.d3dTextureStageStateCache));
     memcpy(savedSpriteState.textureBindingCache, m_TextureBindingCache,
            sizeof(savedSpriteState.textureBindingCache));
     memcpy(savedSpriteState.textureBindingCacheValid, m_TextureBindingCacheValid,
@@ -3759,9 +3919,22 @@ CKBOOL CKDX9RasterizerContext::DrawSprite(CKDWORD Sprite, VxRect *src, VxRect *d
     savedSpriteState.streamOffset = 0;
     savedSpriteState.streamStride = 0;
 
-    HRESULT stateHr = m_Device->CreateStateBlock(D3DSBT_ALL, &savedSpriteState.stateBlock);
-    if (FAILED(stateHr) || !savedSpriteState.stateBlock)
+    HRESULT stateHr = S_OK;
+    if (m_SpriteStateBlock)
+    {
+        stateHr = m_SpriteStateBlock->Capture();
+    }
+    else
+    {
+        stateHr = m_Device->CreateStateBlock(D3DSBT_ALL, &m_SpriteStateBlock);
+    }
+    if (FAILED(stateHr) || !m_SpriteStateBlock)
+    {
+        SAFERELEASE(m_SpriteStateBlock);
         return FALSE;
+    }
+    savedSpriteState.stateBlock = m_SpriteStateBlock;
+    savedSpriteState.stateBlock->AddRef();
 
     savedSpriteState.textureResult =
         m_Device->GetTexture(0, &savedSpriteState.texture0);
@@ -5686,6 +5859,7 @@ HRESULT CKDX9RasterizerContext::ResetDevice()
     // Reset restores D3D's default state, so values cached for the old device
     // state must not suppress the initialization calls below.
     FlushRenderStateCache();
+    ResetTextureStageStateCache();
     m_InverseWinding = FALSE;
 
     // Update device properties
@@ -5967,7 +6141,7 @@ CKBOOL CKDX9RasterizerContext::InternalDrawPrimitiveVB(VXPRIMITIVETYPE pType, CK
     }
 
     // Draw indexed primitives
-    hr = m_Device->SetIndices(m_IndexBuffer[Clip ? 1 : 0]->DxBuffer);
+    hr = SetD3DIndices(m_IndexBuffer[Clip ? 1 : 0]->DxBuffer);
     if (FAILED(hr))
         return FALSE;
 
@@ -6991,7 +7165,7 @@ void CKDX9RasterizerContext::FlushNonManagedObjects()
     }
 
     // Reset indices and vertex streams
-    hr = m_Device->SetIndices(NULL);
+    hr = SetD3DIndices(NULL);
     if (FAILED(hr))
     {
 #if LOGGING
@@ -7101,6 +7275,7 @@ void CKDX9RasterizerContext::FlushNonManagedObjects()
 
     // Reset vertex format cache
     ClearStreamCache();
+    ResetTextureStageStateCache();
 }
 
 void CKDX9RasterizerContext::RestoreDeviceResources()
@@ -7122,6 +7297,7 @@ void CKDX9RasterizerContext::RestoreDeviceResources()
 
 void CKDX9RasterizerContext::ReleaseStateBlocks()
 {
+    SAFERELEASE(m_SpriteStateBlock);
     if (m_Device)
     {
         for (int i = 0; i < 8; i++)
@@ -7149,7 +7325,7 @@ void CKDX9RasterizerContext::ReleaseIndexBuffers()
     // Make sure device isn't using the index buffers
     if (m_Device)
     {
-        m_Device->SetIndices(NULL);
+        SetD3DIndices(NULL);
     }
 
     // Properly release index buffers with proper cleanup

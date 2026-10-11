@@ -440,6 +440,9 @@ protected:
     void ResetTextureStageStateCache();
     void InvalidateStageBlendCache();
     void RecordTextureStageState(int Stage, CKRST_TEXTURESTAGESTATETYPE Tss, CKDWORD Value);
+    HRESULT SetD3DSamplerState(int Stage, D3DSAMPLERSTATETYPE State, CKDWORD Value);
+    HRESULT SetD3DTextureStageState(int Stage, D3DTEXTURESTAGESTATETYPE State, CKDWORD Value);
+    HRESULT SetD3DIndices(LPDIRECT3DINDEXBUFFER9 Buffer);
 
     CKDWORD DX9PresentInterval(DWORD PresentInterval);
     CKBOOL LoadSurface(const D3DSURFACE_DESC &ddsd, const D3DLOCKED_RECT &LockRect, const VxImageDescEx &SurfDesc);
@@ -493,6 +496,13 @@ public:
     CKDWORD m_CurrentVertexSizeCache;
 
     CKDWORD m_CurrentPixelShaderCache;
+    LPDIRECT3DINDEXBUFFER9 m_CurrentIndexBufferCache;
+    CKBOOL m_CurrentIndexBufferCacheValid;
+    CKBOOL m_MaterialCacheValid;
+    CKBOOL m_ViewportCacheValid;
+    CKDWORD m_LightCacheValidMask;
+    CKDWORD m_LightEnableCacheValidMask;
+    CKDWORD m_LightEnableCacheMask;
 
     // Pure devices cannot query clip-plane state, so retain values accepted by
     // SetClipPlane. The mask is cleared whenever the D3D device is initialized
@@ -510,7 +520,10 @@ public:
     LPDIRECT3DSTATEBLOCK9 m_TextureMinFilterStateBlocks[8][8];
     LPDIRECT3DSTATEBLOCK9 m_TextureMagFilterStateBlocks[8][8];
     LPDIRECT3DSTATEBLOCK9 m_TextureMapBlendStateBlocks[10][8];
+    LPDIRECT3DSTATEBLOCK9 m_SpriteStateBlock;
     CKDX9TextureStageStateCacheEntry m_TextureStageStateCache[8][CKRST_TSS_MAXSTATE];
+    CKDX9TextureStageStateCacheEntry m_D3DSamplerStateCache[8][D3DSAMP_DMAPOFFSET + 1];
+    CKDX9TextureStageStateCacheEntry m_D3DTextureStageStateCache[8][D3DTSS_CONSTANT + 1];
     CKDWORD m_TextureBindingCache[8];
     CKBOOL m_TextureBindingCacheValid[8];
     CKBOOL m_TextureStageStateCacheEnabled;
